@@ -11,8 +11,6 @@ The solution acts as a **secure proxy** in front of Azure AI Foundry / OpenAI-co
 ```
 ├── bicep/
 │   └── apim-api.bicep          # Creates API + operation in existing APIM
-├── named-values/
-│   └── named-values.sh         # Creates APIM Named Values (secure runtime input)
 ├── policies/
 │   └── policy.xml              # Operation-level APIM policy
 ├── .env                        # Deployment configuration
