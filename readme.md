@@ -25,7 +25,6 @@ The solution acts as a **secure proxy** in front of Azure AI Foundry / OpenAI-co
 
 * Deploys an **API and operation** using Bicep
 * Applies **operation-level APIM policies**
-* Validates client bearer tokens
 * Extracts user prompts from request payloads
 * Scans prompts using **AccuKnox LLM Defence**
 * Blocks unsafe prompts before model execution
