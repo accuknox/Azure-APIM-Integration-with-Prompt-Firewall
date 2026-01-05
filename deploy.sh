@@ -1,12 +1,55 @@
 #!/usr/bin/env bash
 set -e
 
-source .env
+# ----------------------------------
+# Load .env
+# ----------------------------------
+if [ ! -f .env ]; then
+  echo "❌ .env file not found"
+  exit 1
+fi
 
-echo "Setting subscription..."
+set -o allexport
+source .env
+set +o allexport
+
+
+# ----------------------------------
+# Prompt for AccuKnox token (ONLY secret)
+# ----------------------------------
+echo -n "🔐 Enter AccuKnox LLM Defence Token: "
+read -s ACCUKNOX_TOKEN
+echo ""
+
+if [ -z "$ACCUKNOX_TOKEN" ]; then
+  echo "❌ AccuKnox token cannot be empty"
+  exit 1
+fi
+
+# ----------------------------------
+# Set subscription
+# ----------------------------------
+echo "🔑 Setting subscription..."
 az account set --subscription "$SUBSCRIPTION_ID"
 
-echo "Deploying API & operation..."
+# ----------------------------------
+# Create / Update Named Value
+# ----------------------------------
+echo "🔐 Creating / updating APIM Named Value..."
+
+az apim nv create \
+  --resource-group "$RESOURCE_GROUP" \
+  --service-name "$APIM_SERVICE_NAME" \
+  --named-value-id LLM_DEFENCE_TOKEN \
+  --display-name "AccuKnox-LLM-Defence-Token" \
+  --secret true \
+  --value "$ACCUKNOX_TOKEN"
+
+# ----------------------------------
+# Deploy API & operation
+# ----------------------------------
+echo "🚀 Deploying API & operation..."
+
 az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
   --template-file bicep/apim-api.bicep \
@@ -21,20 +64,15 @@ az deployment group create \
     operationMethod="$OPERATION_METHOD" \
     operationUrlTemplate="$OPERATION_URL_TEMPLATE"
 
-echo "Creating / updating Named Values..."
+# ----------------------------------
+# Apply policy (consistent API version)
+# ----------------------------------
+echo "📜 Applying policy..."
 
-
-echo "NOTE: Secrets must be created once manually or via secure CI:"
-echo " - LLM_DEFENCE_TOKEN"
-
-echo "Applying combined policy..."
 az rest \
   --method PUT \
   --uri "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ApiManagement/service/$APIM_SERVICE_NAME/apis/$API_ID/operations/$OPERATION_ID/policies/policy?api-version=2022-08-01" \
   --headers "Content-Type=application/vnd.ms-azure-apim.policy+xml" \
   --body @policies/policy.xml
 
-
-
-
-echo "Deployment completed successfully."
+echo "✅ Deployment completed successfully"

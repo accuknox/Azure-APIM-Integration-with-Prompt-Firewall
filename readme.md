@@ -230,11 +230,9 @@ Replace the `base-url` with **your Azure AI Foundry / OpenAI deployment endpoint
 
 
 
----
-
 ## 🔐 Secrets Handling (Mandatory)
 
-Secrets **must not** be placed in `.env`.
+Secrets **must not** be placed in `.env` or committed to source control.
 
 This deployment requires the following **APIM Named Value**:
 
@@ -242,15 +240,10 @@ This deployment requires the following **APIM Named Value**:
 | ------------------- | ------------------------------ |
 | `LLM_DEFENCE_TOKEN` | AccuKnox LLM Defence API token |
 
-Create it securely using:
+The AccuKnox token is **requested securely during execution of `deploy.sh`** (input is hidden).  
+The script automatically creates or updates the required **APIM Named Value** as part of the deployment process.
 
-```bash
-bash named-values/named-values.sh <RESOURCE_GROUP> <APIM_SERVICE_NAME>
-```
 
-The script prompts for the token securely (input hidden).
-
----
 
 ## 🚀 Deployment
 
