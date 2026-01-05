@@ -1,0 +1,180 @@
+<policies>
+  <inbound>
+    <base />
+
+    <!-- AUTHENTICATION -->
+    <set-variable name="clientBearer"
+                  value="@{
+                      var auth = context.Request.Headers.GetValueOrDefault(&quot;Authorization&quot;, &quot;&quot;);
+                      if (auth.StartsWith(&quot;Bearer &quot;))
+                      {
+                          return auth.Substring(7);
+                      }
+                      return &quot;&quot;;
+                  }" />
+
+    <choose>
+      <when condition="@(
+          string.IsNullOrEmpty((string)context.Variables[&quot;clientBearer&quot;]) ||
+          (string)context.Variables[&quot;clientBearer&quot;] != &quot;{{AI_FOUNDRY_API_KEY}}&quot;
+      )">
+        <return-response>
+          <set-status code="401" reason="Unauthorized" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>
+            {
+              "error": "Invalid or missing bearer token"
+            }
+          </set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- Preserve original request body -->
+    <set-variable name="originalBody"
+                  value="@(context.Request.Body.As&lt;string&gt;(preserveContent: true))" />
+
+    <!-- Extract user prompt -->
+    <set-variable name="userPrompt"
+                  value="@{
+                      var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+                      return (string)body[&quot;messages&quot;]?[0]?[&quot;content&quot;];
+                  }" />
+
+    <!-- Call AccuKnox LLM Defence (PROMPT scan) -->
+    <send-request mode="new"
+                  response-variable-name="llmDefenceResponse"
+                  timeout="10"
+                  ignore-error="false">
+      <set-url>https://cwpp.dev.accuknox.com/llm-defence/application-query</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-header name="Authorization" exists-action="override">
+        <value>Bearer {{LLM_DEFENCE_TOKEN}}</value>
+      </set-header>
+      <set-body>
+        @{
+          return new JObject(
+            new JProperty("query_type", "prompt"),
+            new JProperty("content", (string)context.Variables["userPrompt"])
+          ).ToString();
+        }
+      </set-body>
+    </send-request>
+
+    <!-- Parse defence response -->
+    <set-variable name="defenceResult"
+                  value="@(((IResponse)context.Variables[&quot;llmDefenceResponse&quot;]).Body.As&lt;JObject&gt;())" />
+
+    <!-- Store session_id -->
+    <set-variable name="defenceSessionId"
+                  value="@(((JObject)context.Variables[&quot;defenceResult&quot;])[&quot;session_id&quot;]?.ToString())" />
+
+    <!-- Block if prompt is unsafe -->
+    <choose>
+      <when condition="@(
+          ((JObject)context.Variables[&quot;defenceResult&quot;])[&quot;query_status&quot;]?.ToString() == &quot;BLOCK&quot;
+      )">
+        <return-response>
+          <set-status code="403" reason="Blocked by LLM Defence" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>
+            {
+              "error": "Prompt blocked by LLM Defence",
+              "severity": "@(((JObject)context.Variables["defenceResult"])["overall_severity"])",
+              "reason": "@(((JObject)context.Variables["defenceResult"])["description"])"
+            }
+          </set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- Forward request to Foundry -->
+    <set-backend-service base-url="https://ai-prompt-firewall-openai.services.ai.azure.com" />
+
+    <set-header name="Authorization" exists-action="override">
+      <value>@($"Bearer {context.Variables["clientBearer"]}")</value>
+    </set-header>
+
+    <set-header name="Content-Type" exists-action="override">
+      <value>application/json</value>
+    </set-header>
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+
+    <!-- Preserve model response -->
+    <set-variable name="modelResponse"
+                  value="@(context.Response.Body.As&lt;JObject&gt;(preserveContent: true))" />
+
+    <!-- Extract assistant content -->
+    <set-variable name="assistantContent"
+                  value="@(
+                      (string)((JObject)context.Variables[&quot;modelResponse&quot;])
+                        [ &quot;choices&quot; ]?[0]?[ &quot;message&quot; ]?[ &quot;content&quot; ]
+                  )" />
+
+    <!-- Call AccuKnox LLM Defence (RESPONSE scan) -->
+    <send-request mode="new"
+                  response-variable-name="llmDefenceResponseScan"
+                  timeout="10"
+                  ignore-error="false">
+      <set-url>https://cwpp.dev.accuknox.com/llm-defence/application-query</set-url>
+      <set-method>POST</set-method>
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-header name="Authorization" exists-action="override">
+        <value>Bearer {{LLM_DEFENCE_TOKEN}}</value>
+      </set-header>
+      <set-body>
+        @{
+          return new JObject(
+            new JProperty("query_type", "response"),
+            new JProperty("content", (string)context.Variables["assistantContent"]),
+            new JProperty("session_id", (string)context.Variables["defenceSessionId"])
+          ).ToString();
+        }
+      </set-body>
+    </send-request>
+
+    <!-- Parse response scan -->
+    <set-variable name="responseDefenceResult"
+                  value="@(((IResponse)context.Variables[&quot;llmDefenceResponseScan&quot;]).Body.As&lt;JObject&gt;())" />
+
+    <!-- Block if response is unsafe -->
+    <choose>
+      <when condition="@(
+          ((JObject)context.Variables[&quot;responseDefenceResult&quot;])[&quot;query_status&quot;]?.ToString() == &quot;BLOCK&quot;
+      )">
+        <return-response>
+          <set-status code="403" reason="Response blocked by LLM Defence" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>
+            {
+              "error": "Model response blocked by LLM Defence",
+              "session_id": "@(context.Variables["defenceSessionId"])"
+            }
+          </set-body>
+        </return-response>
+      </when>
+    </choose>
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>
