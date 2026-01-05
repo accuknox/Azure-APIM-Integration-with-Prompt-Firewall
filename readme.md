@@ -295,41 +295,6 @@ This will:
 
 ---
 
-## ❌ Failure Scenarios
-
-| Scenario                        | HTTP Response               |
-| ------------------------------- | --------------------------- |
-| Missing or invalid bearer token | `401 Unauthorized`          |
-| Prompt blocked by defence       | `403 Forbidden`             |
-| Response blocked by defence     | `403 Forbidden`             |
-| Defence API failure             | Request fails (fail-closed) |
-
----
-
-## 🛠 Troubleshooting
-
-**Policy deployment fails**
-
-* Verify API ID and Operation ID
-* Ensure policy is applied at **operation level**
-* Confirm content type:
-
-  ```
-  application/vnd.ms-azure-apim.policy+xml
-  ```
-
-**Named Value not resolving**
-
-* Ensure `LLM_DEFENCE_TOKEN` exists in APIM
-* Confirm it is marked as **secret**
-
-**Backend authorization errors**
-
-* Ensure client passes valid Foundry API key
-* Ensure backend supports bearer token passthrough
-
----
-
 
 
 
