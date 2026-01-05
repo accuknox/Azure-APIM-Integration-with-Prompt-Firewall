@@ -331,24 +331,6 @@ This will:
 
 ---
 
-## 🧩 Extensibility
 
-This solution can be extended to:
-
-* Add request/response logging
-* Apply policies at API or global scope
-* Support multiple models
-* Add rate limiting or quotas
-* Integrate additional security engines
-
----
-
-## ✅ Design Principles
-
-* No manual APIM UI configuration
-* Secure-by-default (fail closed)
-* Customer-friendly onboarding
-* CI/CD ready
-* Secrets isolated from source code
 
 
