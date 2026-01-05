@@ -1,8 +1,3 @@
-Below is the **updated, complete `README.md`**, with your **expanded prerequisites section integrated cleanly** and aligned with the rest of the document.
-You can replace your existing README with this version directly.
-
----
-
 # Azure APIM Automated Deployment with LLM Prompt & Response Firewall
 
 This repository provides a **fully automated Azure API Management (APIM) deployment** that provisions an API and operation on an **existing APIM instance**, applies an **operation-level security policy**, and integrates **AccuKnox LLM Defence** to inspect and block unsafe prompts and model responses **at runtime**.
