@@ -118,6 +118,7 @@ OPERATION_ID=           # Unique operation identifier (example: chat-completions
 OPERATION_DISPLAY_NAME= # Operation display name, use quotes (example: "Chat Completions")
 OPERATION_METHOD=       # HTTP method for the operation (example: POST)
 OPERATION_URL_TEMPLATE= # Operation URL template (example: /models/chat/completions)
+ACCUKNOX_TOKEN= # Paste the Accuknox token obtained from platform
 ```
 ---
 Perfect — below is the **updated README section** with **exact line numbers called out**, so users know **precisely where to edit** in `policy.xml`.
