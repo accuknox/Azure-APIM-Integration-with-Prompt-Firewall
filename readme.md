@@ -98,16 +98,6 @@ Before running this project, ensure the following prerequisites are met:
      az login
      ```
 
-6. **Required Azure Permissions**
-
-   * `Contributor` on the target resource group
-   * `API Management Service Contributor` on the APIM instance
-
-7. **Bash-Compatible Shell**
-
-   * Linux, macOS, or WSL
-   * Required to execute deployment scripts
-
 ---
 
 ## ⚙️ Configuration (`.env`)
