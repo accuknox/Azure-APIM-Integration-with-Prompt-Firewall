@@ -1,0 +1,511 @@
+<!--
+    AccuKnox LLM Defence - APIM policy template (FIRE-AND-FORGET)
+
+    Prompt and response are sent to AccuKnox with one-way calls: no added
+    latency, nothing is ever blocked. Verdicts are visible in the AccuKnox
+    dashboard.
+
+    All AccuKnox code is in TWO self-contained blocks:
+      - ACCUKNOX LLM DEFENCE - PROMPT SCAN    last block in <inbound>
+                                              (all settings at its top)
+      - ACCUKNOX LLM DEFENCE - RESPONSE SCAN  last block in <outbound>
+    Every variable they create starts with accuknox-. Delete both blocks to
+    remove AccuKnox completely; the rest of the policy is untouched.
+
+    Named Values (APIM > Named values) - both must exist before saving:
+      accuknox-token     Secret / Key Vault-backed AccuKnox API token
+      accuknox-enabled   true | false
+
+    Fail-open: a missing token, unreachable AccuKnox or unparseable payload
+    never fails the caller's request.
+-->
+<policies>
+	<inbound>
+		<base />
+		<!-- ================================================================
+             LLM ROUTING - your existing gateway policy goes here, e.g.
+               authentication / rate limiting
+               <set-backend-service backend-id="your-llm-backend" />
+               <rewrite-uri template="/openai/v1/chat/completions" />
+               <authentication-managed-identity resource="https://cognitiveservices.azure.com/" />
+             Keep it ABOVE the AccuKnox block so the prompt scan sees the
+             final routed body.
+             ================================================================ -->
+		<!-- ================================================================
+             ACCUKNOX LLM DEFENCE - PROMPT SCAN (self-contained block)
+
+             FIRE-AND-FORGET: the prompt is sent with send-one-way-request.
+             The request never waits and is never blocked.
+
+             Prompt = latest user turn of any model payload (OpenAI, Azure
+             OpenAI, Anthropic, Gemini, Bedrock, Cohere, Mistral, Llama,
+             Ollama, Hugging Face, embeddings, completions). Unknown JSON
+             shape -> raw body. Non-text bodies are not scanned.
+             ================================================================ -->
+		<set-variable name="accuknox-enabled" value="@("{{accuknox-enabled}}".Trim().ToLower())" />
+		<choose>
+			<when condition="@(context.Variables.GetValueOrDefault<string>("accuknox-enabled", "") == "true")">
+				<!-- ======== AccuKnox configuration - edit these values only ========
+                     accuknox-endpoint       AccuKnox query URL for your tenant
+                     accuknox-app-name       client-Info header value; "auto" =
+                                             model family (gpt, claude, gemini ...)
+                     accuknox-scan-prompt    false = skip the prompt scan
+                     accuknox-scan-response  false = skip the response scan
+                     Token and on/off switch are Named Values:
+                     accuknox-token (Secret) and accuknox-enabled.
+                     ================================================================= -->
+				<set-variable name="accuknox-endpoint" value="https://cwpp.TENANT.accuknox.com/llm-defence/application-query" />
+				<set-variable name="accuknox-app-name" value="auto" />
+				<set-variable name="accuknox-scan-prompt" value="@(true)" />
+				<set-variable name="accuknox-scan-response" value="@(true)" />
+				<set-variable name="accuknox-request-body" value="@{
+                    try
+                    {
+                        var ct = (context.Request.Headers.GetValueOrDefault("Content-Type", "") ?? "").ToLower();
+                        if (ct != "" && !ct.Contains("json") && !ct.Contains("text")) { return string.Empty; }
+                        return context.Request.Body?.As<string>(preserveContent: true) ?? string.Empty;
+                    }
+                    catch { return string.Empty; }
+                }" />
+				<!-- Model name: body "model", then x-model header, then the URL
+                     (Azure OpenAI /deployments/{name}/, Gemini /models/{name}:...,
+                     Bedrock /model/{id}/...) -->
+				<set-variable name="accuknox-model" value="@{
+                    try
+                    {
+                        var m = string.Empty;
+                        try { m = JObject.Parse(context.Variables.GetValueOrDefault<string>("accuknox-request-body", ""))["model"]?.ToString() ?? string.Empty; } catch { }
+                        if (string.IsNullOrWhiteSpace(m)) { m = context.Request.Headers.GetValueOrDefault("x-model", "") ?? string.Empty; }
+                        if (string.IsNullOrWhiteSpace(m))
+                        {
+                            var path = context.Request.Url?.Path ?? string.Empty;
+                            var match = System.Text.RegularExpressions.Regex.Match(path, @"/(?:deployments|models|model)/([^/:]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                            if (match.Success) { m = System.Uri.UnescapeDataString(match.Groups[1].Value); }
+                        }
+                        return (m ?? string.Empty).Trim().ToLower();
+                    }
+                    catch { return string.Empty; }
+                }" />
+				<!-- client-Info: the accuknox-app-name Named Value, or the model
+                     family when it is "auto". Unknown family -> header not sent. -->
+				<set-variable name="accuknox-app-name" value="@{
+                    var configured = (context.Variables.GetValueOrDefault<string>("accuknox-app-name", "") ?? "").Trim();
+                    if (configured != "" && configured.ToLower() != "auto") { return configured; }
+
+                    var m = context.Variables.GetValueOrDefault<string>("accuknox-model", "") ?? "";
+                    if (m.Contains("embed")) { return "embedding"; }
+                    if (m.Contains("claude")) { return "claude"; }
+                    if (m.Contains("gpt") || m.StartsWith("o1") || m.StartsWith("o3") || m.StartsWith("o4")) { return "gpt"; }
+                    if (m.Contains("gemini") || m.Contains("gemma")) { return "gemini"; }
+                    if (m.Contains("llama")) { return "llama"; }
+                    if (m.Contains("mistral") || m.Contains("mixtral") || m.Contains("codestral")) { return "mistral"; }
+                    if (m.Contains("command") || m.Contains("cohere")) { return "cohere"; }
+                    if (m.Contains("titan") || m.Contains("nova")) { return "amazon"; }
+                    if (m.Contains("deepseek")) { return "deepseek"; }
+                    if (m.Contains("phi")) { return "phi"; }
+                    if (m.Contains("grok")) { return "grok"; }
+                    return string.Empty;
+                }" />
+				<set-variable name="accuknox-prompt" value="@{
+                    var raw = context.Variables.GetValueOrDefault<string>("accuknox-request-body", string.Empty) ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(raw)) { return string.Empty; }
+
+                    JObject body = null;
+                    try { body = JObject.Parse(raw); } catch { return raw; }
+
+                    try
+                    {
+                        // 1. Conversational payloads - latest user turn.
+                        //    messages: OpenAI / Azure OpenAI / Anthropic / Mistral / Llama /
+                        //              Cohere v2 / Bedrock Converse / Ollama chat
+                        //    contents: Gemini / Vertex
+                        //    input:    OpenAI Responses API (array form)
+                        var turnFields = new string[] { "messages", "contents", "input" };
+                        foreach (var field in turnFields)
+                        {
+                            JToken turns = body[field];
+                            if (turns == null) { continue; }
+                            if (turns.Type == JTokenType.Object) { turns = new JArray(turns); }
+                            if (turns.Type != JTokenType.Array) { continue; }
+
+                            var arr = (JArray)turns;
+                            for (int i = arr.Count - 1; i >= 0; i--)
+                            {
+                                var turn = arr[i];
+                                if (turn.Type != JTokenType.Object) { continue; }
+
+                                // No role = single-turn payload, treated as user.
+                                var role = ((turn["role"] ?? turn["author"])?.ToString() ?? string.Empty).ToLower();
+                                if (role != "" && role != "user" && role != "human") { continue; }
+
+                                JToken content = turn["content"] ?? turn["parts"] ?? turn["text"];
+                                if (content == null) { continue; }
+                                if (content.Type == JTokenType.String)
+                                {
+                                    var s = (string)content;
+                                    if (!string.IsNullOrWhiteSpace(s)) { return s; }
+                                    continue;
+                                }
+                                if (content.Type == JTokenType.Object) { content = new JArray(content); }
+                                if (content.Type != JTokenType.Array) { continue; }
+
+                                // Text blocks only: {type:text|input_text, text} or a
+                                // type-less {text} (Gemini parts, Bedrock Converse).
+                                // tool_result / image / audio blocks are skipped, so a
+                                // tool-result-only user turn falls back to an earlier one.
+                                var sb = new System.Text.StringBuilder();
+                                foreach (var block in (JArray)content)
+                                {
+                                    string t = null;
+                                    if (block.Type == JTokenType.String) { t = (string)block; }
+                                    else if (block.Type == JTokenType.Object)
+                                    {
+                                        var type = block["type"]?.ToString() ?? string.Empty;
+                                        var tt = block["text"];
+                                        if ((type == "" || type == "text" || type == "input_text") && tt != null && tt.Type == JTokenType.String) { t = (string)tt; }
+                                    }
+                                    if (!string.IsNullOrWhiteSpace(t))
+                                    {
+                                        if (sb.Length > 0) { sb.Append("\n"); }
+                                        sb.Append(t);
+                                    }
+                                }
+                                if (sb.Length > 0) { return sb.ToString(); }
+                            }
+                        }
+
+                        // 2. Single-shot payloads (string or array of strings).
+                        //    input:     Responses API / embeddings
+                        //    prompt:    legacy completions / Llama / Bedrock / Ollama
+                        //    inputText: Amazon Titan
+                        //    inputs:    Hugging Face TGI
+                        //    message:   Cohere v1 chat
+                        var promptFields = new string[] { "input", "prompt", "inputText", "inputs", "message", "query", "question", "text" };
+                        foreach (var field in promptFields)
+                        {
+                            var tok = body[field];
+                            if (tok == null) { continue; }
+                            if (tok.Type == JTokenType.String)
+                            {
+                                var s = (string)tok;
+                                if (!string.IsNullOrWhiteSpace(s)) { return s; }
+                            }
+                            else if (tok.Type == JTokenType.Array)
+                            {
+                                var sb = new System.Text.StringBuilder();
+                                foreach (var item in (JArray)tok)
+                                {
+                                    if (item.Type != JTokenType.String) { continue; }
+                                    var s = (string)item;
+                                    if (string.IsNullOrWhiteSpace(s)) { continue; }
+                                    if (sb.Length > 0) { sb.Append("\n"); }
+                                    sb.Append(s);
+                                }
+                                if (sb.Length > 0) { return sb.ToString(); }
+                            }
+                        }
+
+                        // 3. Vertex AI predict: instances[].prompt / instances[].content
+                        if (body["instances"] != null && body["instances"].Type == JTokenType.Array)
+                        {
+                            var sb = new System.Text.StringBuilder();
+                            foreach (var inst in (JArray)body["instances"])
+                            {
+                                if (inst.Type != JTokenType.Object) { continue; }
+                                var tok = inst["prompt"] ?? inst["content"];
+                                if (tok == null || tok.Type != JTokenType.String) { continue; }
+                                var s = (string)tok;
+                                if (string.IsNullOrWhiteSpace(s)) { continue; }
+                                if (sb.Length > 0) { sb.Append("\n"); }
+                                sb.Append(s);
+                            }
+                            if (sb.Length > 0) { return sb.ToString(); }
+                        }
+
+                        // Unknown shape -> raw body
+                        return raw;
+                    }
+                    catch
+                    {
+                        return raw;
+                    }
+                }" />
+				<choose>
+					<when condition="@(
+                        context.Variables.GetValueOrDefault<bool>("accuknox-scan-prompt", false)
+                        && !string.IsNullOrWhiteSpace(context.Variables.GetValueOrDefault<string>("accuknox-prompt", ""))
+                    )">
+						<send-one-way-request mode="new" timeout="10">
+							<set-url>@(context.Variables.GetValueOrDefault<string>("accuknox-endpoint", ""))</set-url>
+							<set-method>POST</set-method>
+							<set-header name="Content-Type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-header name="Authorization" exists-action="override">
+								<value>Bearer {{accuknox-token}}</value>
+							</set-header>
+							<set-header name="client-Info" exists-action="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault<string>("accuknox-app-name", "")) ? "delete" : "override")">
+								<value>@(context.Variables.GetValueOrDefault<string>("accuknox-app-name", ""))</value>
+							</set-header>
+							<set-body>@{
+                                return new JObject(
+                                    new JProperty("query_type", "prompt"),
+                                    new JProperty("content", context.Variables.GetValueOrDefault<string>("accuknox-prompt", string.Empty) ?? string.Empty)
+                                ).ToString();
+                            }</set-body>
+						</send-one-way-request>
+					</when>
+				</choose>
+				<trace source="apim" severity="information">
+					<message>accuknox-prompt-scan</message>
+					<metadata name="correlation_id" value="@(context.Variables.GetValueOrDefault<string>("correlation-id", context.RequestId.ToString()) ?? "none")" />
+					<metadata name="mode" value="fire-and-forget" />
+					<metadata name="dispatched" value="@(context.Variables.GetValueOrDefault<bool>("accuknox-scan-prompt", false) && !string.IsNullOrWhiteSpace(context.Variables.GetValueOrDefault<string>("accuknox-prompt", "")) ? "true" : "false")" />
+					<metadata name="prompt_chars" value="@((context.Variables.GetValueOrDefault<string>("accuknox-prompt", "") ?? "").Length.ToString())" />
+					<metadata name="model" value="@(context.Variables.GetValueOrDefault<string>("accuknox-model", "") ?? "")" />
+					<metadata name="app_name" value="@(context.Variables.GetValueOrDefault<string>("accuknox-app-name", "") ?? "")" />
+				</trace>
+				<!-- Tells the outbound AccuKnox block that this request is in scope -->
+				<set-variable name="accuknox-scan" value="@(true)" />
+			</when>
+		</choose>
+		<!-- ================= END ACCUKNOX PROMPT SCAN ================= -->
+	</inbound>
+	<backend>
+		<!-- buffer-response must stay true (the default) so the response
+             scan can read the model's reply -->
+		<base />
+	</backend>
+	<outbound>
+		<base />
+		<!-- ================================================================
+             ACCUKNOX LLM DEFENCE - RESPONSE SCAN (self-contained block)
+
+             Runs only when the prompt block marked the request in scope and
+             the model returned 2xx. The reply is read with preserveContent,
+             so the caller gets it unchanged unless it is blocked.
+
+             FIRE-AND-FORGET: the response is sent with send-one-way-request.
+             The caller never waits and the response is never blocked.
+
+             Response text is read from every model reply format, including
+             streamed SSE / NDJSON replies. Embedding replies are skipped.
+             ================================================================ -->
+		<choose>
+			<when condition="@(
+                context.Variables.GetValueOrDefault<bool>("accuknox-scan", false)
+                && context.Variables.GetValueOrDefault<bool>("accuknox-scan-response", false)
+                && context.Response != null
+                && context.Response.StatusCode >= 200
+                && context.Response.StatusCode < 300
+            )">
+				<set-variable name="accuknox-response-text" value="@{
+                    var raw = string.Empty;
+                    try { raw = context.Response.Body?.As<string>(preserveContent: true) ?? string.Empty; } catch { return string.Empty; }
+                    if (string.IsNullOrWhiteSpace(raw)) { return string.Empty; }
+
+                    try
+                    {
+                        // Split the body into JSON chunks
+                        var chunks = new List<JObject>();
+                        var trimmed = raw.Trim();
+                        var parsedWhole = false;
+                        if (trimmed.StartsWith("{") || trimmed.StartsWith("["))
+                        {
+                            try
+                            {
+                                var whole = JToken.Parse(trimmed);
+                                parsedWhole = true;
+                                if (whole.Type == JTokenType.Object) { chunks.Add((JObject)whole); }
+                                else if (whole.Type == JTokenType.Array)
+                                {
+                                    foreach (var item in (JArray)whole)
+                                    {
+                                        if (item.Type == JTokenType.Object) { chunks.Add((JObject)item); }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                        if (!parsedWhole)
+                        {
+                            // SSE (data: {...}) or NDJSON ({...} per line)
+                            foreach (var line in raw.Split('\n'))
+                            {
+                                var l = line.Trim();
+                                if (l.StartsWith("data:")) { l = l.Substring(5).Trim(); }
+                                if (!l.StartsWith("{")) { continue; }
+                                try { chunks.Add(JObject.Parse(l)); } catch { }
+                            }
+                        }
+                        if (chunks.Count == 0) { return raw; }
+
+                        var sb = new System.Text.StringBuilder();
+                        foreach (var c in chunks)
+                        {
+                            // Tokens that are a string, a text block or an array of text blocks
+                            var candidates = new List<JToken>();
+                            var evt = c["type"]?.ToString() ?? string.Empty;
+
+                            if (evt.StartsWith("response."))
+                            {
+                                // Responses API stream: only deltas carry new text;
+                                // response.completed repeats the whole output.
+                                if (evt == "response.output_text.delta" || evt == "response.refusal.delta") { candidates.Add(c["delta"]); }
+                            }
+                            else if (evt == "content_block_delta")
+                            {
+                                // Anthropic stream
+                                candidates.Add(c["delta"]?["text"]);
+                            }
+                            else
+                            {
+                                // Anthropic Messages
+                                candidates.Add(c["content"]);
+
+                                // OpenAI / Azure OpenAI chat + legacy completions (+ stream chunks)
+                                if (c["choices"] != null && c["choices"].Type == JTokenType.Array)
+                                {
+                                    foreach (var choice in (JArray)c["choices"])
+                                    {
+                                        if (choice.Type != JTokenType.Object) { continue; }
+                                        candidates.Add(choice["message"]?["content"]);
+                                        candidates.Add(choice["message"]?["refusal"]);
+                                        candidates.Add(choice["delta"]?["content"]);
+                                        candidates.Add(choice["delta"]?["refusal"]);
+                                        candidates.Add(choice["text"]);
+                                    }
+                                }
+
+                                // Responses API (output array) / Bedrock Converse (output object)
+                                if (c["output"] != null && c["output"].Type == JTokenType.Array)
+                                {
+                                    foreach (var item in (JArray)c["output"])
+                                    {
+                                        if (item.Type == JTokenType.Object) { candidates.Add(item["content"]); }
+                                    }
+                                }
+                                else if (c["output"] != null && c["output"].Type == JTokenType.Object)
+                                {
+                                    candidates.Add(c["output"]["message"]?["content"]);
+                                }
+
+                                // Gemini / Vertex
+                                if (c["candidates"] != null && c["candidates"].Type == JTokenType.Array)
+                                {
+                                    foreach (var cand in (JArray)c["candidates"])
+                                    {
+                                        if (cand.Type == JTokenType.Object) { candidates.Add(cand["content"]?["parts"]); }
+                                    }
+                                }
+                                if (c["predictions"] != null && c["predictions"].Type == JTokenType.Array)
+                                {
+                                    foreach (var pred in (JArray)c["predictions"])
+                                    {
+                                        if (pred.Type == JTokenType.String) { candidates.Add(pred); }
+                                        else if (pred.Type == JTokenType.Object) { candidates.Add(pred["content"]); }
+                                    }
+                                }
+
+                                // Cohere v2 / Ollama chat
+                                if (c["message"] != null && c["message"].Type == JTokenType.Object) { candidates.Add(c["message"]["content"]); }
+
+                                // Bedrock Mistral outputs[].text, Titan results[].outputText
+                                if (c["outputs"] != null && c["outputs"].Type == JTokenType.Array)
+                                {
+                                    foreach (var o in (JArray)c["outputs"])
+                                    {
+                                        if (o.Type == JTokenType.Object) { candidates.Add(o["text"]); }
+                                    }
+                                }
+                                if (c["results"] != null && c["results"].Type == JTokenType.Array)
+                                {
+                                    foreach (var r in (JArray)c["results"])
+                                    {
+                                        if (r.Type == JTokenType.Object) { candidates.Add(r["outputText"]); }
+                                    }
+                                }
+
+                                // Scalar string fields: Responses output_text, Cohere v1 text,
+                                // Bedrock Llama generation / Claude-legacy completion,
+                                // Ollama response, Hugging Face generated_text
+                                var scalarFields = new string[] { "output_text", "text", "generation", "completion", "response", "generated_text", "outputText" };
+                                foreach (var f in scalarFields)
+                                {
+                                    if (c[f] != null && c[f].Type == JTokenType.String) { candidates.Add(c[f]); }
+                                }
+                            }
+
+                            foreach (var cand in candidates)
+                            {
+                                if (cand == null) { continue; }
+                                var blocks = cand.Type == JTokenType.Array ? (JArray)cand : new JArray(cand);
+                                foreach (var block in blocks)
+                                {
+                                    string t = null;
+                                    if (block.Type == JTokenType.String) { t = (string)block; }
+                                    else if (block.Type == JTokenType.Object)
+                                    {
+                                        var type = block["type"]?.ToString() ?? string.Empty;
+                                        if (type == "refusal" && block["refusal"] != null && block["refusal"].Type == JTokenType.String) { t = (string)block["refusal"]; }
+                                        else if ((type == "" || type == "text" || type == "output_text") && block["text"] != null && block["text"].Type == JTokenType.String) { t = (string)block["text"]; }
+                                    }
+                                    if (!string.IsNullOrEmpty(t)) { sb.Append(t); }
+                                }
+                            }
+                        }
+
+                        if (sb.Length > 0) { return sb.ToString(); }
+
+                        // Embedding vectors carry no text - skip instead of sending raw
+                        if (raw.Contains("\"embedding\"")) { return string.Empty; }
+                        return raw;
+                    }
+                    catch
+                    {
+                        return raw;
+                    }
+                }" />
+				<choose>
+					<when condition="@(!string.IsNullOrWhiteSpace(context.Variables.GetValueOrDefault<string>("accuknox-response-text", "")))">
+						<send-one-way-request mode="new" timeout="10">
+							<set-url>@(context.Variables.GetValueOrDefault<string>("accuknox-endpoint", ""))</set-url>
+							<set-method>POST</set-method>
+							<set-header name="Content-Type" exists-action="override">
+								<value>application/json</value>
+							</set-header>
+							<set-header name="Authorization" exists-action="override">
+								<value>Bearer {{accuknox-token}}</value>
+							</set-header>
+							<set-header name="client-Info" exists-action="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault<string>("accuknox-app-name", "")) ? "delete" : "override")">
+								<value>@(context.Variables.GetValueOrDefault<string>("accuknox-app-name", ""))</value>
+							</set-header>
+							<!-- session_id is empty: in fire-and-forget mode the prompt
+                                 scan never returns one to pair with -->
+							<set-body>@{
+                                return new JObject(
+                                    new JProperty("query_type", "response"),
+                                    new JProperty("content", context.Variables.GetValueOrDefault<string>("accuknox-response-text", string.Empty) ?? string.Empty),
+                                    new JProperty("session_id", string.Empty)
+                                ).ToString();
+                            }</set-body>
+						</send-one-way-request>
+					</when>
+				</choose>
+				<trace source="apim" severity="information">
+					<message>accuknox-response-scan</message>
+					<metadata name="correlation_id" value="@(context.Variables.GetValueOrDefault<string>("correlation-id", context.RequestId.ToString()) ?? "none")" />
+					<metadata name="mode" value="fire-and-forget" />
+					<metadata name="dispatched" value="@(!string.IsNullOrWhiteSpace(context.Variables.GetValueOrDefault<string>("accuknox-response-text", "")) ? "true" : "false")" />
+					<metadata name="response_chars" value="@((context.Variables.GetValueOrDefault<string>("accuknox-response-text", "") ?? "").Length.ToString())" />
+					<metadata name="model" value="@(context.Variables.GetValueOrDefault<string>("accuknox-model", "") ?? "")" />
+					<metadata name="app_name" value="@(context.Variables.GetValueOrDefault<string>("accuknox-app-name", "") ?? "")" />
+				</trace>
+			</when>
+		</choose>
+		<!-- ================= END ACCUKNOX RESPONSE SCAN ================= -->
+	</outbound>
+	<on-error>
+		<base />
+	</on-error>
+</policies>
